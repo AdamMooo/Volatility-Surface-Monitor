@@ -694,6 +694,4 @@ if __name__ == '__main__':
     print("Starting Volatility Surface Monitor...")
     print("Open http://127.0.0.1:8050 in your browser")
     app.run(debug=True, port=8050)
-git add .
-git commit -m "Add deployment files"
-git push
+
