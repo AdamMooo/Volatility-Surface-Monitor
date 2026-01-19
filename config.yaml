@@ -1,0 +1,40 @@
+# Volatility Surface Integrity & Stress Monitor Configuration
+
+data:
+  ticker: "SPY"
+  lookback_days: 30
+
+filtering:
+  min_moneyness: 0.7
+  max_moneyness: 1.3
+  min_volume: 10
+  max_spread_pct: 0.20
+  min_days_to_expiry: 7
+  max_days_to_expiry: 365
+
+surface:
+  interpolation_method: "rbf"
+  smoothing: 0.0
+  grid_resolution: 50
+
+arbitrage:
+  tolerance: 0.001
+  use_bid_ask: true
+
+regime:
+  percentile_thresholds:
+    pre_stress_curvature: 70
+    elevated_vol: 70
+    acute_vol: 90
+    acute_curvature: 90
+  z_score_threshold: 2.0
+  lookback_for_zscore: 252
+
+reporting:
+  output_dir: "reports"
+  format: "html"
+  schedule_time: "18:00"
+
+visualization:
+  colorscale: "RdYlBu"
+  template: "plotly_white"
