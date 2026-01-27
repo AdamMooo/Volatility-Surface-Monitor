@@ -17,6 +17,8 @@ from enum import Enum
 import numpy as np
 import pandas as pd
 from loguru import logger
+from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
 
 
 class MarketRegime(Enum):
@@ -397,3 +399,349 @@ def classify_regime_simple(
         return "recovery"
     else:
         return "calm"
+
+
+class GMMRegimeClassifier:
+    """
+    Gaussian Mixture Model-based regime classifier.
+    
+    Models the distribution of market states using GMM clustering.
+    Focuses on how market distributions evolve and transition over time.
+    """
+    
+    def __init__(
+        self,
+        n_components: int = 5,
+        random_state: int = 42,
+        feature_cols: Optional[List[str]] = None
+    ):
+        """
+        Initialize GMM classifier.
+        
+        Args:
+            n_components: Number of mixture components (regimes)
+            random_state: Random seed for reproducibility
+            feature_cols: Columns to use as features
+        """
+        self.n_components = n_components
+        self.random_state = random_state
+        self.feature_cols = feature_cols or [
+            'avg_atm_vol', 'unemployment_rate', 'yield_curve_spread', 'spy_return'
+        ]
+        self.gmm = None
+        self.scaler = StandardScaler()
+        self.is_fitted = False
+        self.regime_names = ['calm', 'pre_stress', 'elevated', 'acute', 'recovery']
+        
+    def fit(self, historical_data: pd.DataFrame) -> None:
+        """
+        Fit GMM on historical market metrics.
+        
+        Args:
+            historical_data: DataFrame with historical metrics
+        """
+        if len(historical_data) < self.n_components * 10:
+            logger.warning(f"Insufficient data for GMM fitting: {len(historical_data)} samples")
+            return
+            
+        # Extract features
+        features = historical_data[self.feature_cols].dropna()
+        if len(features) == 0:
+            logger.warning("No valid feature data for GMM fitting")
+            return
+            
+        # Convert to numpy array for scaling
+        features_array = features.values
+        
+        # Scale features
+        self.scaler.fit(features_array)
+        scaled_features = self.scaler.transform(features_array)
+        
+        # Fit GMM
+        self.gmm = GaussianMixture(
+            n_components=min(self.n_components, len(features)),
+            random_state=self.random_state,
+            covariance_type='full'
+        )
+        self.gmm.fit(scaled_features)
+        
+        # Store training data for fit score calculation
+        self._training_features = features_array
+        training_ll = self.gmm.score_samples(scaled_features)
+        self._training_avg_log_likelihood = np.mean(training_ll)
+        
+        self.is_fitted = True
+        
+        logger.info(f"GMM fitted with {self.gmm.n_components} components on {len(features)} samples")
+    
+    def predict(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Predict regime for current metrics using GMM.
+        
+        Args:
+            metrics: Current market metrics
+            
+        Returns:
+            Classification results
+        """
+        if not self.is_fitted:
+            return {
+                'regime': 'unknown',
+                'confidence': 0.0,
+                'probabilities': {},
+                'distribution_fit': 'model_not_fitted'
+            }
+        
+        # Extract current features
+        current_features = []
+        for col in self.feature_cols:
+            if col in metrics.get('summary', {}):
+                current_features.append(metrics['summary'][col])
+            else:
+                current_features.append(0.0)  # Default for missing features
+        
+        # Convert to numpy array and scale
+        current_features_array = np.array([current_features])
+        scaled_features = self.scaler.transform(current_features_array)
+        
+        # Predict
+        regime_idx = self.gmm.predict(scaled_features)[0]
+        probabilities = self.gmm.predict_proba(scaled_features)[0]
+        log_likelihood = self.gmm.score_samples(scaled_features)[0]
+        
+        # Calculate fit score as normalized likelihood relative to training data
+        # Use the average log-likelihood of training data as reference
+        if hasattr(self, '_training_avg_log_likelihood'):
+            avg_training_ll = self._training_avg_log_likelihood
+        else:
+            # Calculate average log-likelihood on training data
+            training_features = self.scaler.transform(self._training_features)
+            training_ll = self.gmm.score_samples(training_features)
+            avg_training_ll = np.mean(training_ll)
+            self._training_avg_log_likelihood = avg_training_ll
+        
+        # Fit score: relative likelihood compared to training average
+        # Values > 1.0: better fit than average training point
+        # Values < 1.0: worse fit than average training point
+        relative_ll = log_likelihood - avg_training_ll
+        fit_score = np.exp(relative_ll)
+        
+        # Provide more granular interpretation
+        if fit_score < 0.1:
+            fit_quality = "extreme_outlier"
+        elif fit_score < 0.5:
+            fit_quality = "poor_fit"
+        elif fit_score < 1.5:
+            fit_quality = "moderate_fit"
+        else:
+            fit_quality = "strong_fit"
+        
+        # For extreme outliers, don't force classification into existing regimes
+        if fit_score < 0.1:
+            regime_name = "unprecedented"
+            confidence = 0.0
+            probabilities = {name: 0.0 for name in self.regime_names}
+            probabilities["unprecedented"] = 1.0
+            regime_idx = -1  # Special index for unprecedented
+        else:
+            regime_idx = self.gmm.predict(scaled_features)[0]
+            probabilities_array = self.gmm.predict_proba(scaled_features)[0]
+            regime_name = self.regime_names[regime_idx] if regime_idx < len(self.regime_names) else f"regime_{regime_idx}"
+            confidence = float(probabilities_array[regime_idx])
+            probabilities = {self.regime_names[i] if i < len(self.regime_names) else f"regime_{i}": float(p) 
+                            for i, p in enumerate(probabilities_array)}
+        
+        return {
+            'regime': regime_name,
+            'confidence': float(confidence),
+            'probabilities': probabilities,
+            'distribution_fit': float(fit_score),
+            'fit_quality': fit_quality,
+            'log_likelihood': float(log_likelihood),
+            'regime_idx': int(regime_idx)
+        }
+    
+    def predict(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Predict regime for current metrics.
+        
+        Args:
+            metrics: Current market metrics
+            
+        Returns:
+            Classification results
+        """
+        if not self.is_fitted:
+            return {
+                'regime': 'unknown',
+                'confidence': 0.0,
+                'probabilities': {},
+                'distribution_fit': 'model_not_fitted'
+            }
+        
+        # Extract current features
+        current_features = []
+        for col in self.feature_cols:
+            if col in metrics.get('summary', {}):
+                current_features.append(metrics['summary'][col])
+            else:
+                current_features.append(0.0)  # Default for missing features
+        
+        # Convert to numpy array and scale
+        current_features_array = np.array([current_features])
+        scaled_features = self.scaler.transform(current_features_array)
+        
+        # Predict
+        regime_idx = self.gmm.predict(scaled_features)[0]
+        probabilities = self.gmm.predict_proba(scaled_features)[0]
+        log_likelihood = self.gmm.score_samples(scaled_features)[0]
+        
+        # Calculate fit score as normalized likelihood relative to training data
+        # Use the average log-likelihood of training data as reference
+        if hasattr(self, '_training_avg_log_likelihood'):
+            avg_training_ll = self._training_avg_log_likelihood
+        else:
+            # Calculate average log-likelihood on training data
+            training_features = self.scaler.transform(self._training_features)
+            training_ll = self.gmm.score_samples(training_features)
+            avg_training_ll = np.mean(training_ll)
+            self._training_avg_log_likelihood = avg_training_ll
+        
+        # Fit score: relative likelihood compared to training average
+        # Values > 1.0: better fit than average training point
+        # Values < 1.0: worse fit than average training point
+        relative_ll = log_likelihood - avg_training_ll
+        fit_score = np.exp(relative_ll)
+        
+        # Provide more granular interpretation
+        if fit_score < 0.1:
+            fit_quality = "extreme_outlier"
+        elif fit_score < 0.5:
+            fit_quality = "poor_fit"
+        elif fit_score < 1.5:
+            fit_quality = "moderate_fit"
+        else:
+            fit_quality = "strong_fit"
+        
+        # For extreme outliers, don't force classification into existing regimes
+        if fit_score < 0.1:
+            regime_name = "unprecedented"
+            confidence = 0.0
+            probabilities = {name: 0.0 for name in self.regime_names}
+            probabilities["unprecedented"] = 1.0
+            regime_idx = -1  # Special index for unprecedented
+        else:
+            regime_idx = self.gmm.predict(scaled_features)[0]
+            probabilities_array = self.gmm.predict_proba(scaled_features)[0]
+            regime_name = self.regime_names[regime_idx] if regime_idx < len(self.regime_names) else f"regime_{regime_idx}"
+            confidence = float(probabilities_array[regime_idx])
+            probabilities = {self.regime_names[i] if i < len(self.regime_names) else f"regime_{i}": float(p) 
+                            for i, p in enumerate(probabilities_array)}
+        
+        return {
+            'regime': regime_name,
+            'confidence': confidence,
+            'probabilities': probabilities,
+            'distribution_fit': float(fit_score),
+            'fit_quality': fit_quality,
+            'log_likelihood': float(log_likelihood),
+            'regime_idx': int(regime_idx)
+        }
+    
+    def analyze_distribution_evolution(self, historical_data: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Analyze how market distributions evolve over time.
+        
+        Args:
+            historical_data: Historical metrics with dates
+            
+        Returns:
+            Distribution evolution analysis
+        """
+        if not self.is_fitted or len(historical_data) == 0:
+            return {}
+            
+        # Get predictions for historical data
+        predictions = []
+        for idx, row in historical_data.iterrows():
+            metrics = {'summary': {col: row[col] for col in self.feature_cols if col in row}}
+            pred = self.predict(metrics)
+            pred['date'] = idx
+            predictions.append(pred)
+        
+        pred_df = pd.DataFrame(predictions)
+        
+        # Analyze regime transitions
+        transitions = []
+        prev_regime = None
+        for _, row in pred_df.iterrows():
+            current = row['regime']
+            if prev_regime and current != prev_regime:
+                transitions.append({
+                    'date': row['date'],
+                    'from': prev_regime,
+                    'to': current,
+                    'confidence': row['confidence']
+                })
+            prev_regime = current
+        
+        # Distribution statistics
+        regime_counts = pred_df['regime'].value_counts()
+        avg_confidence = pred_df['confidence'].mean()
+        
+        return {
+            'regime_distribution': regime_counts.to_dict(),
+            'average_confidence': float(avg_confidence),
+            'transitions': transitions,
+            'total_periods': len(pred_df),
+            'transition_count': len(transitions)
+        }
+    
+    def analyze_distribution_evolution(self, historical_data: pd.DataFrame) -> Dict[str, Any]:
+        """
+        Analyze how market distributions evolve over time.
+        
+        Args:
+            historical_data: Historical metrics with dates
+            
+        Returns:
+            Distribution evolution analysis
+        """
+        if not self.is_fitted or len(historical_data) == 0:
+            return {}
+            
+        # Get predictions for historical data
+        predictions = []
+        for idx, row in historical_data.iterrows():
+            metrics = {'summary': {col: row[col] for col in self.feature_cols if col in row}}
+            pred = self.predict(metrics)
+            pred['date'] = idx
+            predictions.append(pred)
+        
+        pred_df = pd.DataFrame(predictions)
+        
+        # Analyze regime transitions
+        transitions = []
+        prev_regime = None
+        for _, row in pred_df.iterrows():
+            current = row['regime']
+            if prev_regime and current != prev_regime:
+                transitions.append({
+                    'date': row['date'],
+                    'from': prev_regime,
+                    'to': current,
+                    'confidence': row['confidence']
+                })
+            prev_regime = current
+        
+        # Distribution statistics
+        regime_counts = pred_df['regime'].value_counts()
+        avg_confidence = pred_df['confidence'].mean()
+        
+        return {
+            'regime_distribution': regime_counts.to_dict(),
+            'average_confidence': float(avg_confidence),
+            'transitions': transitions,
+            'total_periods': len(pred_df),
+            'transition_count': len(transitions)
+        }

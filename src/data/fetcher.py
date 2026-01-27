@@ -19,6 +19,13 @@ import pandas as pd
 import yfinance as yf
 from loguru import logger
 
+try:
+    from fredapi import Fred
+    FRED_AVAILABLE = True
+except ImportError:
+    FRED_AVAILABLE = False
+    logger.warning("fredapi not available. FRED data fetching disabled.")
+
 
 class RiskFreeRateFetcher:
     """Fetches risk-free rates from Treasury yields."""
@@ -72,6 +79,84 @@ class RiskFreeRateFetcher:
             if maturity_days <= days:
                 return ticker
         return "^TNX"
+    
+    def _is_cache_valid(self) -> bool:
+        """Check if cache is still valid."""
+        if self._cache_time is None:
+            return False
+        return datetime.now() - self._cache_time < self._cache_duration
+
+
+class FREDDataFetcher:
+    """
+    Fetches macroeconomic data from FRED (Federal Reserve Economic Data).
+    
+    Provides orthogonal features for volatility regime modeling.
+    """
+    
+    # Key FRED series for volatility modeling
+    SERIES = {
+        'unemployment_rate': 'UNRATE',          # Unemployment rate
+        'fed_funds_rate': 'FEDFUNDS',           # Federal funds rate
+        'treasury_10y': 'GS10',                 # 10-year treasury rate
+        'treasury_2y': 'GS2',                   # 2-year treasury rate
+        'yield_curve_spread': 'T10Y2Y',         # 10Y-2Y spread
+        'cpi_inflation': 'CPIAUCSL',            # CPI (inflation)
+        'industrial_production': 'INDPRO',      # Industrial production index
+        'consumer_sentiment': 'UMCSENT',        # Consumer sentiment
+    }
+    
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        Initialize FRED fetcher.
+        
+        Args:
+            api_key: FRED API key (get from https://fred.stlouisfed.org/docs/api/api_key.html)
+        """
+        if not FRED_AVAILABLE:
+            raise ImportError("fredapi not installed. Install with: pip install fredapi")
+            
+        self.api_key = api_key or "9284d1ec1af2e1c12114b61681304e81"  # Real FRED API key
+        if self.api_key == "your_fred_api_key_here":
+            logger.warning("FRED API key not set. Using demo mode with limited data.")
+            self.fred = None
+        else:
+            self.fred = Fred(api_key=self.api_key)
+        self._cache: Dict[str, pd.Series] = {}
+        self._cache_time: Optional[datetime] = None
+        self._cache_duration = timedelta(hours=6)  # FRED data updates less frequently
+    
+    def fetch_economic_indicators(self, start_date: str = '2020-01-01') -> Dict[str, pd.Series]:
+        """
+        Fetch historical economic indicators for regime modeling.
+        
+        Args:
+            start_date: Start date for historical context
+            
+        Returns:
+            Dictionary of pandas Series with historical data
+        """
+        if not self._is_cache_valid():
+            self._refresh_cache(start_date)
+        
+        return self._cache
+    
+    def _refresh_cache(self, start_date: str):
+        """Refresh cached FRED data."""
+        self._cache = {}
+        if self.fred is None:
+            logger.warning("FRED API not available. Using synthetic economic data.")
+            return
+            
+        for name, series_id in self.SERIES.items():
+            try:
+                series = self.fred.get_series(series_id, start_date)
+                self._cache[series_id] = series
+                logger.info(f"Fetched FRED series {series_id}")
+            except Exception as e:
+                logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
+        
+        self._cache_time = datetime.now()
     
     def _is_cache_valid(self) -> bool:
         """Check if cache is still valid."""

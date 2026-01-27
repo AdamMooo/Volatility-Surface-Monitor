@@ -8,6 +8,7 @@ scipy>=1.10.0
 
 # Financial Data
 yfinance>=0.2.28
+fredapi>=0.5.1
 
 # Options Pricing
 py_vollib>=1.0.1

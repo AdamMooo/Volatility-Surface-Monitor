@@ -13,17 +13,16 @@ This project builds an **early warning system for market stress** by analyzing t
 
 ```
 volatility_surface_monitor/
+├── dashboard.py          # Main Dash application
+├── train_gmm.py          # GMM model training script
+├── notebooks/            # Jupyter notebooks for exploration
 ├── src/
-│   ├── data/           # Data acquisition and cleaning
-│   ├── models/         # IV surface construction & pricing
-│   ├── analytics/      # Arbitrage, geometry, tail risk, regime detection
-│   ├── visualization/  # Plotly visualizations and dashboards
-│   └── reporting/      # Automated report generation
-├── notebooks/          # Jupyter notebooks for exploration
-├── tests/              # Unit tests
-├── data/               # Raw and processed data storage
-├── reports/            # Generated reports
-└── dashboard/          # Dash application
+│   ├── data/             # Data acquisition, cleaning, and trained models
+│   ├── models/           # Core pricing models (Black-Scholes, IV surface)
+│   ├── analytics/        # Geometry metrics, tail risk, regime classification
+│   └── __init__.py
+├── tests/                # Unit tests
+└── config files          # pyproject.toml, requirements.txt, etc.
 ```
 
 ## Quick Start
@@ -46,7 +45,7 @@ pip install -r requirements.txt
 from src.data.fetcher import OptionChainFetcher
 from src.models.surface import IVSurface
 from src.analytics.geometry import compute_all_geometry_metrics
-from src.analytics.regime_classifier import RegimeClassifier
+from src.analytics.regime_classifier import GMMRegimeClassifier
 
 # Fetch option data
 fetcher = OptionChainFetcher()
@@ -59,10 +58,23 @@ surface.build(data)
 # Compute geometry metrics
 metrics = compute_all_geometry_metrics(surface, spot=data['underlying_price'].iloc[0])
 
-# Classify regime
-classifier = RegimeClassifier()
+# Classify regime using GMM
+classifier = GMMRegimeClassifier()
 regime = classifier.classify(metrics)
 print(f"Current Regime: {regime['current_regime']}")
+```
+
+### Running the Dashboard
+
+```bash
+# Start the dashboard
+python dashboard.py
+```
+
+### Training the GMM Model
+
+```bash
+python train_gmm.py
 ```
 
 ## Key Metrics
@@ -84,14 +96,7 @@ print(f"Current Regime: {regime['current_regime']}")
 
 ## Documentation
 
-See the notebooks for detailed walkthroughs:
-- `01_data_exploration.ipynb` - Understanding option chain data
-- `02_surface_construction.ipynb` - Building IV surfaces
-- `03_arbitrage_analysis.ipynb` - No-arbitrage checks
-- `04_geometry_metrics.ipynb` - Skew and curvature analysis
-- `05_tail_risk_analysis.ipynb` - Risk-neutral density
-- `06_regime_detection.ipynb` - Market regime classification
-- `07_backtesting_signals.ipynb` - Historical validation
+- `notebooks/gmm_backtesting.ipynb` - GMM model training, validation, and backtesting with synthetic historical data
 
 ## Disclaimer
 

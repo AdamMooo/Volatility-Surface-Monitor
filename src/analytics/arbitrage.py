@@ -1,14 +1,3 @@
-"""
-Arbitrage Detection Module
-
-Check for no-arbitrage violations in the option surface.
-
-Three Types of Arbitrage in Options:
-1. STRIKE (Butterfly) ARBITRAGE - C(K) must be convex in K
-2. CALENDAR (Horizontal) ARBITRAGE - option value must increase with T
-3. VERTICAL ARBITRAGE - Call spread must be positive
-"""
-
 from typing import Dict, List, Any, Optional, Tuple
 import numpy as np
 import pandas as pd
