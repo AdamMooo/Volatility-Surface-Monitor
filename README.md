@@ -13,7 +13,8 @@ This project builds an **early warning system for market stress** by analyzing t
 
 ```
 volatility_surface_monitor/
-├── dashboard.py          # Main Dash application
+├── streamlit_app.py      # Main Streamlit application
+├── dashboard.py          # Legacy Dash application (deprecated)
 ├── train_gmm.py          # GMM model training script
 ├── notebooks/            # Jupyter notebooks for exploration
 ├── src/
@@ -67,8 +68,11 @@ print(f"Current Regime: {regime['current_regime']}")
 ### Running the Dashboard
 
 ```bash
-# Start the dashboard
-python dashboard.py
+# Start the Streamlit dashboard
+streamlit run streamlit_app.py
+
+# The dashboard will open in your browser automatically
+# Default URL: http://localhost:8501
 ```
 
 ### Training the GMM Model
