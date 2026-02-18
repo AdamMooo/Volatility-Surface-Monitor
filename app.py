@@ -60,11 +60,12 @@ st.sidebar.title("📈 Volatility Surface Monitor")
 st.sidebar.markdown("---")
 
 # Ticker selection
-ticker = st.sidebar.text_input(
+ticker_input = st.sidebar.text_input(
     "Ticker Symbol",
     value=config.get('data', {}).get('ticker', 'SPY'),
     help="Enter the ticker symbol for analysis"
-).upper()
+)
+ticker = ticker_input.upper() if ticker_input else 'SPY'
 
 # Data fetch button
 if st.sidebar.button("🔄 Fetch Data", type="primary"):
