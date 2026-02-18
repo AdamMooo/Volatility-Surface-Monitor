@@ -13,11 +13,57 @@ Responsibilities:
 import time
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
+from threading import Lock
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from loguru import logger
+
+from src.data.cache import DataCache
+
+
+# Global rate limiter to prevent API abuse
+class RateLimiter:
+    """Simple rate limiter with exponential backoff."""
+    
+    def __init__(self, min_interval: float = 2.0, max_interval: float = 60.0):
+        self._lock = Lock()
+        self._last_call = 0.0
+        self._min_interval = min_interval
+        self._max_interval = max_interval
+        self._current_interval = min_interval
+        self._consecutive_errors = 0
+    
+    def wait(self):
+        """Wait appropriate time before next API call."""
+        with self._lock:
+            elapsed = time.time() - self._last_call
+            wait_time = max(0, self._current_interval - elapsed)
+            if wait_time > 0:
+                logger.debug(f"Rate limiter: waiting {wait_time:.1f}s")
+                time.sleep(wait_time)
+            self._last_call = time.time()
+    
+    def report_success(self):
+        """Report successful API call."""
+        with self._lock:
+            self._consecutive_errors = 0
+            self._current_interval = self._min_interval
+    
+    def report_error(self):
+        """Report API error, increase backoff."""
+        with self._lock:
+            self._consecutive_errors += 1
+            self._current_interval = min(
+                self._max_interval,
+                self._min_interval * (2 ** self._consecutive_errors)
+            )
+            logger.warning(f"Rate limit backoff: {self._current_interval:.1f}s")
+
+
+# Global rate limiter instance
+_rate_limiter = RateLimiter(min_interval=1.5, max_interval=60.0)
 
 
 class RiskFreeRateFetcher:
@@ -88,22 +134,28 @@ class OptionChainFetcher:
     computes mid-prices, and standardizes output format.
     """
     
-    def __init__(self, max_retries: int = 3, retry_delay: float = 1.0):
+    def __init__(self, max_retries: int = 5, retry_delay: float = 2.0, use_cache: bool = True, cache_max_age_hours: float = 0.5):
         """
         Initialize the fetcher.
         
         Args:
             max_retries: Maximum number of retry attempts
             retry_delay: Initial delay between retries (uses exponential backoff)
+            use_cache: Whether to use local caching
+            cache_max_age_hours: Maximum age of cached data in hours (default 30 min)
         """
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_fetcher = RiskFreeRateFetcher()
+        self.use_cache = use_cache
+        self.cache_max_age_hours = cache_max_age_hours
+        self._cache = DataCache() if use_cache else None
     
     def fetch_option_chain(
         self, 
         ticker: str, 
-        expiration: Optional[str] = None
+        expiration: Optional[str] = None,
+        force_refresh: bool = False
     ) -> pd.DataFrame:
         """
         Fetch option chain for a ticker.
@@ -112,12 +164,27 @@ class OptionChainFetcher:
             ticker: Stock/ETF ticker symbol (e.g., 'SPY')
             expiration: Specific expiration date (YYYY-MM-DD). 
                        If None, fetches all available expirations.
+            force_refresh: If True, bypass cache and fetch fresh data
         
         Returns:
             DataFrame with standardized option chain data
         """
-        stock = self._get_ticker_with_retry(ticker)
-        spot_price = self.get_spot_price(ticker)
+        # Try cache first (only for full chain fetches without specific expiration)
+        if self.use_cache and self._cache and expiration is None and not force_refresh:
+            cached = self._cache.get(ticker, max_age_hours=self.cache_max_age_hours)
+            if cached is not None and not cached.empty:
+                logger.info(f"Using cached data for {ticker} ({len(cached)} rows)")
+                return cached
+        
+        # Apply rate limiting before API calls
+        _rate_limiter.wait()
+        
+        try:
+            stock = self._get_ticker_with_retry(ticker)
+            spot_price = self.get_spot_price(ticker)
+        except Exception as e:
+            _rate_limiter.report_error()
+            raise
         
         if expiration:
             expirations = [expiration]
@@ -136,10 +203,18 @@ class OptionChainFetcher:
                 continue
         
         if not all_chains:
+            _rate_limiter.report_error()
             raise ValueError(f"No option data available for {ticker}")
         
         result = pd.concat(all_chains, ignore_index=True)
         result = self._add_derived_columns(result, spot_price)
+        
+        # Report success and cache the result
+        _rate_limiter.report_success()
+        
+        if self.use_cache and self._cache and expiration is None:
+            self._cache.put(ticker, result)
+            logger.info(f"Cached {len(result)} rows for {ticker}")
         
         return result
     
@@ -164,9 +239,15 @@ class OptionChainFetcher:
             try:
                 return yf.Ticker(ticker)
             except Exception as e:
+                _rate_limiter.report_error()
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
-                    logger.warning(f"Retry {attempt + 1}/{self.max_retries} after {delay}s: {e}")
+                    # Check for rate limit specific errors
+                    if 'Too Many Requests' in str(e) or '429' in str(e):
+                        delay = max(delay, 30)  # Wait at least 30s on rate limit
+                        logger.warning(f"Rate limited! Waiting {delay}s before retry {attempt + 1}/{self.max_retries}")
+                    else:
+                        logger.warning(f"Retry {attempt + 1}/{self.max_retries} after {delay}s: {e}")
                     time.sleep(delay)
                 else:
                     raise
