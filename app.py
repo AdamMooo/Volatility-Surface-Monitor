@@ -16,14 +16,11 @@ from pathlib import Path
 from src.data.fetcher import OptionChainFetcher
 from src.data.cleaner import clean_option_chain, filter_by_moneyness, filter_by_volume
 from src.models.surface import IVSurface
-from src.analytics.geometry import (
-    compute_all_geometry_metrics, compute_curvature, compute_skew
-)
+from src.analytics.geometry import compute_all_geometry_metrics
 from src.analytics.regime_classifier import RegimeClassifier, MarketRegime
 from src.analytics.arbitrage import run_all_arbitrage_checks
 from src.models.density import extract_density, extract_density_from_iv, compute_moments, compute_tail_mass
 from src.visualization.surface_plots import plot_iv_surface, plot_smile_comparison, plot_term_structure
-from src.visualization.heatmaps import plot_curvature_heatmap, plot_skew_heatmap
 from src.visualization.regime_visuals import plot_regime_gauge, plot_early_warning_dashboard, create_regime_summary_card
 
 # Configure page
@@ -199,9 +196,8 @@ if page == "Surface & Structure":
     # 3D Surface
     st.subheader("3D Implied Volatility Surface")
     try:
-        surface_df = iv_surface.to_dataframe()
         fig_surface = plot_iv_surface(
-            surface_df, title=f"{ticker_name} IV Surface", spot=spot_price
+            iv_surface, title=f"{ticker_name} IV Surface", spot=spot_price
         )
         st.plotly_chart(fig_surface, use_container_width=True)
     except Exception as e:
@@ -234,54 +230,6 @@ if page == "Surface & Structure":
             st.plotly_chart(fig_term, use_container_width=True)
         except Exception as e:
             st.error(f"Error plotting term structure: {str(e)}")
-
-    # Curvature and skew heatmaps -- computed from the actual surface, not IV proxy
-    st.markdown("---")
-    col_c, col_s = st.columns(2)
-
-    with col_c:
-        st.subheader("Curvature Heatmap (d^2 sigma / dK^2)")
-        try:
-            surface_df = iv_surface.to_dataframe()
-            if 'iv' in surface_df.columns and 'strike' in surface_df.columns and 'time_to_expiry' in surface_df.columns:
-                sigma_func = lambda K, T: iv_surface.evaluate(K, T)
-                curvatures = []
-                for _, row in surface_df.iterrows():
-                    try:
-                        c = compute_curvature(sigma_func, row['strike'], row['time_to_expiry'], spot_price)
-                        curvatures.append(c if np.isfinite(c) else 0.0)
-                    except Exception:
-                        curvatures.append(0.0)
-                curv_df = surface_df[['strike', 'time_to_expiry']].copy()
-                curv_df['curvature'] = curvatures
-                fig_curv = plot_curvature_heatmap(curv_df)
-                st.plotly_chart(fig_curv, use_container_width=True)
-            else:
-                st.info("Curvature heatmap unavailable -- missing surface columns.")
-        except Exception as e:
-            st.info(f"Curvature heatmap unavailable: {str(e)}")
-
-    with col_s:
-        st.subheader("Skew Heatmap (d sigma / dK)")
-        try:
-            surface_df = iv_surface.to_dataframe()
-            if 'iv' in surface_df.columns and 'strike' in surface_df.columns and 'time_to_expiry' in surface_df.columns:
-                sigma_func = lambda K, T: iv_surface.evaluate(K, T)
-                skews = []
-                for _, row in surface_df.iterrows():
-                    try:
-                        s = compute_skew(sigma_func, row['strike'], row['time_to_expiry'], spot_price)
-                        skews.append(s if np.isfinite(s) else 0.0)
-                    except Exception:
-                        skews.append(0.0)
-                skew_df = surface_df[['strike', 'time_to_expiry']].copy()
-                skew_df['skew'] = skews
-                fig_skew = plot_skew_heatmap(skew_df)
-                st.plotly_chart(fig_skew, use_container_width=True)
-            else:
-                st.info("Skew heatmap unavailable -- missing surface columns.")
-        except Exception as e:
-            st.info(f"Skew heatmap unavailable: {str(e)}")
 
 
 # ---------------------------------------------------------------------------

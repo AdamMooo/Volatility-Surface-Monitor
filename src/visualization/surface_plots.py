@@ -9,89 +9,128 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from scipy.ndimage import gaussian_filter
 
 
 def plot_iv_surface(
-    surface_data: pd.DataFrame,
+    surface,
     title: str = "Implied Volatility Surface",
     colorscale: str = "Viridis",
     show_atm: bool = True,
-    spot: Optional[float] = None
+    spot: Optional[float] = None,
+    K_steps: int = 60,
+    T_steps: int = 30
 ) -> go.Figure:
     """
-    Create 3D IV surface plot.
-    
+    Create 3D IV surface plot from an IVSurface object.
+
+    Uses the interpolated surface to produce a smooth, regular grid.
+
     Args:
-        surface_data: DataFrame with strike, time_to_expiry, iv columns
+        surface: An IVSurface object (must be built) OR a DataFrame
+                 with strike, time_to_expiry, iv columns (legacy).
         title: Plot title
         colorscale: Plotly colorscale name
         show_atm: Whether to highlight ATM line
         spot: Spot price for ATM reference
-        
+        K_steps: Grid resolution along strike axis
+        T_steps: Grid resolution along maturity axis
+
     Returns:
         Plotly Figure object
     """
-    required_cols = ['strike', 'time_to_expiry', 'iv']
-    for col in required_cols:
-        if col not in surface_data.columns:
-            if col == 'iv' and 'implied_volatility' in surface_data.columns:
-                surface_data = surface_data.rename(columns={'implied_volatility': 'iv'})
-            else:
-                raise ValueError(f"Missing required column: {col}")
-    
-    strikes = sorted(surface_data['strike'].unique())
-    maturities = sorted(surface_data['time_to_expiry'].unique())
-    
-    Z = np.full((len(maturities), len(strikes)), np.nan)
-    
-    for _, row in surface_data.iterrows():
-        i = maturities.index(row['time_to_expiry'])
-        j = strikes.index(row['strike'])
-        Z[i, j] = row['iv'] * 100
-    
-    X, Y = np.meshgrid(strikes, maturities)
-    
+    # ------------------------------------------------------------------
+    # Build the regular grid from the interpolated surface
+    # ------------------------------------------------------------------
+    if isinstance(surface, pd.DataFrame):
+        # Legacy path: caller passed a DataFrame instead of IVSurface
+        df = surface
+        if 'implied_volatility' in df.columns:
+            df = df.rename(columns={'implied_volatility': 'iv'})
+        strikes = np.linspace(df['strike'].min(), df['strike'].max(), K_steps)
+        maturities = np.linspace(
+            df['time_to_expiry'].min(), df['time_to_expiry'].max(), T_steps
+        )
+        X, Y = np.meshgrid(strikes, maturities)
+        from scipy.interpolate import griddata as _griddata
+        Z = _griddata(
+            (df['strike'].values, df['time_to_expiry'].values),
+            df['iv'].values * 100,
+            (X, Y),
+            method='cubic'
+        )
+        if spot is None and 'spot' in df.columns:
+            spot = float(df['spot'].iloc[0])
+    else:
+        # Preferred path: IVSurface object
+        if spot is None:
+            spot = surface.spot
+
+        # Use a sensible moneyness range (80%-120% of spot) so the
+        # surface doesn't include extreme wings that blow up.
+        K_min = spot * 0.80
+        K_max = spot * 1.20
+        T_min = max(min(surface.maturities), 0.02) if surface.maturities else 0.02
+        T_max = max(surface.maturities) if surface.maturities else 1.0
+
+        K_grid, T_grid, IV_grid = surface.evaluate_grid(
+            K_range=(K_min, K_max),
+            T_range=(T_min, T_max),
+            K_steps=K_steps,
+            T_steps=T_steps
+        )
+        X = K_grid
+        Y = T_grid
+        Z = IV_grid * 100  # convert to percent
+
+        # Clamp outliers and smooth for a clean classic surface
+        median_iv = np.nanmedian(Z)
+        Z = np.clip(Z, 0, median_iv * 3)
+        Z = np.where(np.isnan(Z), median_iv, Z)
+        Z = gaussian_filter(Z, sigma=1.2)
+
     fig = go.Figure()
-    
+
     fig.add_trace(go.Surface(
         x=X,
         y=Y,
         z=Z,
         colorscale=colorscale,
         colorbar=dict(
-            title="IV (%)",
-            titleside="right"
+            title=dict(text="IV (%)", side="right")
         ),
         hovertemplate=(
-            "Strike: %{x:.2f}<br>"
+            "Strike: %{x:.0f}<br>"
             "Maturity: %{y:.3f} yrs<br>"
             "IV: %{z:.2f}%<br>"
             "<extra></extra>"
-        )
+        ),
+        connectgaps=True
     ))
-    
+
+    # ATM line across maturities
     if show_atm and spot is not None:
-        atm_strikes = [spot] * len(maturities)
+        T_vals = np.linspace(Y.min(), Y.max(), T_steps)
         atm_ivs = []
-        for T in maturities:
-            row = surface_data[
-                (abs(surface_data['strike'] - spot) < spot * 0.01) &
-                (surface_data['time_to_expiry'] == T)
-            ]
-            if not row.empty:
-                atm_ivs.append(row['iv'].iloc[0] * 100)
-            else:
+        for T in T_vals:
+            try:
+                if hasattr(surface, 'evaluate'):
+                    iv = surface.evaluate(spot, float(T)) * 100
+                else:
+                    iv = np.nan
+                atm_ivs.append(iv if np.isfinite(iv) else np.nan)
+            except Exception:
                 atm_ivs.append(np.nan)
-        
+
         fig.add_trace(go.Scatter3d(
-            x=atm_strikes,
-            y=maturities,
+            x=[spot] * len(T_vals),
+            y=T_vals.tolist(),
             z=atm_ivs,
             mode='lines',
             line=dict(color='red', width=5),
             name='ATM'
         ))
-    
+
     fig.update_layout(
         title=dict(text=title, x=0.5),
         scene=dict(
@@ -106,7 +145,7 @@ def plot_iv_surface(
         height=700,
         margin=dict(l=50, r=50, t=80, b=50)
     )
-    
+
     return fig
 
 

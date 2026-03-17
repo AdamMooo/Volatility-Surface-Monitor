@@ -29,17 +29,23 @@ def plot_curvature_heatmap(
         Plotly Figure
     """
     if isinstance(curvature_data.index, pd.RangeIndex):
-        pivot = curvature_data.pivot(
+        curvature_data = curvature_data.copy()
+        curvature_data['strike'] = pd.to_numeric(curvature_data['strike'], errors='coerce')
+        curvature_data['time_to_expiry'] = pd.to_numeric(curvature_data['time_to_expiry'], errors='coerce')
+        curvature_data['curvature'] = pd.to_numeric(curvature_data['curvature'], errors='coerce')
+        curvature_data = curvature_data.dropna()
+        pivot = curvature_data.pivot_table(
             index='strike', 
             columns='time_to_expiry', 
-            values='curvature'
+            values='curvature',
+            aggfunc='mean'
         )
     else:
         pivot = curvature_data
     
     fig = go.Figure(data=go.Heatmap(
         z=pivot.values * 10000,
-        x=[f"{t:.2f}y" for t in pivot.columns],
+        x=[f"{float(t):.2f}y" for t in pivot.columns],
         y=pivot.index,
         colorscale=colorscale,
         colorbar=dict(title="Curvature (bps)"),
@@ -79,10 +85,16 @@ def plot_skew_heatmap(
         Plotly Figure
     """
     if isinstance(skew_data.index, pd.RangeIndex):
-        pivot = skew_data.pivot(
+        skew_data = skew_data.copy()
+        skew_data['strike'] = pd.to_numeric(skew_data['strike'], errors='coerce')
+        skew_data['time_to_expiry'] = pd.to_numeric(skew_data['time_to_expiry'], errors='coerce')
+        skew_data['skew'] = pd.to_numeric(skew_data['skew'], errors='coerce')
+        skew_data = skew_data.dropna()
+        pivot = skew_data.pivot_table(
             index='strike', 
             columns='time_to_expiry', 
-            values='skew'
+            values='skew',
+            aggfunc='mean'
         )
     else:
         pivot = skew_data
@@ -91,7 +103,7 @@ def plot_skew_heatmap(
     
     fig = go.Figure(data=go.Heatmap(
         z=pivot.values * 100,
-        x=[f"{t:.2f}y" for t in pivot.columns],
+        x=[f"{float(t):.2f}y" for t in pivot.columns],
         y=pivot.index,
         colorscale=colorscale,
         zmid=0,
