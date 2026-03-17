@@ -186,7 +186,7 @@ class IVSurface:
         z: np.ndarray
     ) -> Callable:
         """Create RBF interpolator."""
-        rbf = Rbf(x, y, z, function='thin_plate_spline', smooth=self.smoothing)
+        rbf = Rbf(x, y, z, function='thin_plate', smooth=self.smoothing)
         
         def interpolator(x_new, y_new):
             result = rbf(x_new, y_new)
