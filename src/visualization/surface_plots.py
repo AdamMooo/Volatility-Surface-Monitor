@@ -16,79 +16,72 @@ def plot_iv_surface(
     surface,
     title: str = "Implied Volatility Surface",
     colorscale: str = "Viridis",
-    show_atm: bool = True,
     spot: Optional[float] = None,
-    K_steps: int = 60,
-    T_steps: int = 30
+    K_steps: int = 80,
+    T_steps: int = 40
 ) -> go.Figure:
     """
-    Create 3D IV surface plot from an IVSurface object.
+    Create a classic smooth 3D implied-volatility surface.
 
-    Uses the interpolated surface to produce a smooth, regular grid.
-
-    Args:
-        surface: An IVSurface object (must be built) OR a DataFrame
-                 with strike, time_to_expiry, iv columns (legacy).
-        title: Plot title
-        colorscale: Plotly colorscale name
-        show_atm: Whether to highlight ATM line
-        spot: Spot price for ATM reference
-        K_steps: Grid resolution along strike axis
-        T_steps: Grid resolution along maturity axis
-
-    Returns:
-        Plotly Figure object
+    Bypasses the IVSurface RBF (which can blow up) and instead
+    interpolates the raw IV data directly with scipy griddata for
+    a well-behaved, visually clean surface.
     """
-    # ------------------------------------------------------------------
-    # Build the regular grid from the interpolated surface
-    # ------------------------------------------------------------------
+    from scipy.interpolate import griddata as _griddata
+
+    # ---- Extract raw IV data ----
     if isinstance(surface, pd.DataFrame):
-        # Legacy path: caller passed a DataFrame instead of IVSurface
-        df = surface
+        df = surface.copy()
         if 'implied_volatility' in df.columns:
             df = df.rename(columns={'implied_volatility': 'iv'})
-        strikes = np.linspace(df['strike'].min(), df['strike'].max(), K_steps)
-        maturities = np.linspace(
-            df['time_to_expiry'].min(), df['time_to_expiry'].max(), T_steps
-        )
-        X, Y = np.meshgrid(strikes, maturities)
-        from scipy.interpolate import griddata as _griddata
-        Z = _griddata(
-            (df['strike'].values, df['time_to_expiry'].values),
-            df['iv'].values * 100,
-            (X, Y),
-            method='cubic'
-        )
         if spot is None and 'spot' in df.columns:
             spot = float(df['spot'].iloc[0])
     else:
-        # Preferred path: IVSurface object
+        df = surface.to_dataframe()
         if spot is None:
             spot = surface.spot
 
-        # Use a sensible moneyness range (80%-120% of spot) so the
-        # surface doesn't include extreme wings that blow up.
-        K_min = spot * 0.80
-        K_max = spot * 1.20
-        T_min = max(min(surface.maturities), 0.02) if surface.maturities else 0.02
-        T_max = max(surface.maturities) if surface.maturities else 1.0
+    # Ensure numeric
+    for col in ('strike', 'time_to_expiry', 'iv'):
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['strike', 'time_to_expiry', 'iv'])
+    df = df[df['iv'] > 0]
 
-        K_grid, T_grid, IV_grid = surface.evaluate_grid(
-            K_range=(K_min, K_max),
-            T_range=(T_min, T_max),
-            K_steps=K_steps,
-            T_steps=T_steps
-        )
-        X = K_grid
-        Y = T_grid
-        Z = IV_grid * 100  # convert to percent
+    # ---- Restrict to a sensible moneyness window ----
+    if spot:
+        df = df[(df['strike'] >= spot * 0.80) & (df['strike'] <= spot * 1.20)]
 
-        # Clamp outliers and smooth for a clean classic surface
-        median_iv = np.nanmedian(Z)
-        Z = np.clip(Z, 0, median_iv * 3)
-        Z = np.where(np.isnan(Z), median_iv, Z)
-        Z = gaussian_filter(Z, sigma=1.2)
+    if df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No option data in range", showarrow=False)
+        return fig
 
+    # ---- Build a regular grid ----
+    K_vals = np.linspace(df['strike'].min(), df['strike'].max(), K_steps)
+    T_vals = np.linspace(df['time_to_expiry'].min(), df['time_to_expiry'].max(), T_steps)
+    X, Y = np.meshgrid(K_vals, T_vals)
+
+    # Cubic interpolation on the raw data – well-behaved, no RBF blowup
+    Z = _griddata(
+        (df['strike'].values, df['time_to_expiry'].values),
+        df['iv'].values * 100,
+        (X, Y),
+        method='cubic'
+    )
+
+    # Fill any NaN edges with nearest-neighbor so there are no holes
+    Z_nearest = _griddata(
+        (df['strike'].values, df['time_to_expiry'].values),
+        df['iv'].values * 100,
+        (X, Y),
+        method='nearest'
+    )
+    Z = np.where(np.isnan(Z), Z_nearest, Z)
+
+    # Light gaussian smooth for a polished look
+    Z = gaussian_filter(Z, sigma=1.0)
+
+    # ---- Plot ----
     fig = go.Figure()
 
     fig.add_trace(go.Surface(
@@ -96,40 +89,19 @@ def plot_iv_surface(
         y=Y,
         z=Z,
         colorscale=colorscale,
-        colorbar=dict(
-            title=dict(text="IV (%)", side="right")
-        ),
+        colorbar=dict(title=dict(text="IV (%)", side="right")),
         hovertemplate=(
             "Strike: %{x:.0f}<br>"
             "Maturity: %{y:.3f} yrs<br>"
             "IV: %{z:.2f}%<br>"
             "<extra></extra>"
         ),
-        connectgaps=True
+        connectgaps=True,
+        lighting=dict(ambient=0.6, diffuse=0.5, specular=0.2),
+        contours=dict(
+            z=dict(show=True, usecolormap=True, highlightcolor="white", project_z=True)
+        )
     ))
-
-    # ATM line across maturities
-    if show_atm and spot is not None:
-        T_vals = np.linspace(Y.min(), Y.max(), T_steps)
-        atm_ivs = []
-        for T in T_vals:
-            try:
-                if hasattr(surface, 'evaluate'):
-                    iv = surface.evaluate(spot, float(T)) * 100
-                else:
-                    iv = np.nan
-                atm_ivs.append(iv if np.isfinite(iv) else np.nan)
-            except Exception:
-                atm_ivs.append(np.nan)
-
-        fig.add_trace(go.Scatter3d(
-            x=[spot] * len(T_vals),
-            y=T_vals.tolist(),
-            z=atm_ivs,
-            mode='lines',
-            line=dict(color='red', width=5),
-            name='ATM'
-        ))
 
     fig.update_layout(
         title=dict(text=title, x=0.5),
@@ -137,9 +109,8 @@ def plot_iv_surface(
             xaxis_title="Strike",
             yaxis_title="Time to Expiry (years)",
             zaxis_title="Implied Volatility (%)",
-            camera=dict(
-                eye=dict(x=1.5, y=-1.5, z=1)
-            )
+            camera=dict(eye=dict(x=1.8, y=-1.8, z=1.2)),
+            aspectratio=dict(x=1.2, y=1.2, z=0.7),
         ),
         template="plotly_white",
         height=700,
